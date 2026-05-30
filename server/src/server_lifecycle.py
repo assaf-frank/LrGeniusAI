@@ -1,6 +1,8 @@
 import os
+import sys
 import time
 import signal
+import subprocess
 import config
 from config import logger, IMAGE_MODEL_ID, CLIP_MODEL_NAME, TORCH_DEVICE
 import open_clip
@@ -347,10 +349,69 @@ def remove_ok_file():
         pass
 
 
+def _terminate_process():
+    """Exit this process reliably, releasing the listening socket.
+
+    SIGINT lets waitress shut down gracefully where the launcher honors it
+    (launchd, the Windows .cmd). Some launchers ignore SIGINT in the child
+    (e.g. `uv run`), so an armed watchdog hard-exits shortly after — guaranteeing
+    the port frees for a replacement (or the next login start) on every platform.
+    """
+    remove_pid_file()
+    remove_ok_file()
+
+    def _hard_exit():
+        time.sleep(3)
+        os._exit(0)
+
+    threading.Thread(target=_hard_exit, daemon=True).start()
+    try:
+        os.kill(os.getpid(), signal.SIGINT)
+    except Exception:
+        os._exit(0)
+
+
 def request_shutdown():
     logger.info("Shutdown request received")
     time.sleep(1)  # Give time for the response to be sent
-    os.kill(os.getpid(), signal.SIGINT)
+    _terminate_process()
+
+
+def _spawn_replacement():
+    """Launch a detached copy of this server with the same interpreter, args, and env.
+
+    sys.executable is the bundled pythonw.exe on Windows; sys.argv already carries
+    --db-path; os.environ already carries the env (KMP_DUPLICATE_LIB_OK, PYTHONPATH)
+    set by the .cmd launcher on Windows or the launchd plist on macOS.
+    """
+    args = [sys.executable] + sys.argv
+    env = os.environ.copy()
+    kwargs = {"env": env, "close_fds": True}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            subprocess.CREATE_NO_WINDOW
+            | subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen(args, **kwargs)
+
+
+def request_restart():
+    """Restart the backend identically on every platform.
+
+    The OS launcher (Windows HKCU Run key, macOS launchd RunAtLoad) only starts
+    the server at login, so restart is handled entirely in-process: spawn a
+    detached replacement, then terminate. The replacement waits for the port to
+    free (see geniusai_server._wait_for_port_free) before binding.
+    """
+    logger.info("Restart request received")
+    try:
+        _spawn_replacement()
+    except Exception:
+        logger.error("Failed to spawn replacement server", exc_info=True)
+    request_shutdown()
 
 
 def get_health_status():

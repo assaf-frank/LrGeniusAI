@@ -34,11 +34,14 @@ def unload():
 @server_bp.route("/restart", methods=["POST"])
 def restart():
     """
-    Gracefully shut down the server.
-    If running as an OS service (launchd/Windows Service), it will be automatically restarted.
+    Restart the server.
+
+    On supervised platforms (macOS launchd KeepAlive) the process simply exits and the
+    supervisor respawns it. Elsewhere (Windows, dev) the backend spawns a detached copy
+    of itself before exiting, since the HKCU Run key only starts it at logon.
     """
     logger.info("Restart request received via API")
-    server_lifecycle.request_shutdown()
+    server_lifecycle.request_restart()
     return jsonify({"status": "Restarting..."})
 
 
